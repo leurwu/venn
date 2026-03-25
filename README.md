@@ -2,7 +2,7 @@
  
 An interactive, self-contained web tool for visualising overlaps between gene sets with on-hover protein function summaries and one-click enrichment analysis links.
  
-**Live tool:** https://leurwu.github.io/venn/venn_diagram_tool.html
+**Live tool:** [https://leurwu.github.io/venn/venn_diagram_tool.html](https://ntmytran.github.io/venn/)
  
 ---
  
