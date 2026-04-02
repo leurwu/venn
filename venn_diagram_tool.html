@@ -542,6 +542,7 @@ header .badge {
   font-family: 'Inter', system-ui, sans-serif;
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body>
 
@@ -594,6 +595,16 @@ header .badge {
           <rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 6h6M5 9h6M5 12h3"/>
         </svg>
         CSV
+      </button>
+      <div class="toolbar-sep"></div>
+      <!-- export PPTX -->
+      <button class="toolbar-btn" id="pptx-btn" onclick="downloadPPTX()" title="Export Venn diagram + top intersection gene list to PowerPoint">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1" y="2" width="14" height="12" rx="2"/>
+          <path d="M4 6h4a1.5 1.5 0 0 1 0 3H4"/>
+          <path d="M4 9v3"/>
+        </svg>
+        PPTX
       </button>
     </div>
     <svg id="venn-svg" viewBox="0 0 800 440" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -976,6 +987,42 @@ function getAllRegions(gsets) {
     .filter(r => r.genes.size > 0);
 }
 
+
+// ── Smart region label placement ──────────────────────────────────────────────
+// For a region defined by `indices` (the circles it belongs to) and `excludes`
+// (all other circles), compute a label position that sits inside the lens/petal.
+// Strategy: start from the centroid of the member circles, then nudge AWAY from
+// each non-member circle centre so the label avoids overlapping adjacent regions.
+function regionLabelPos(indices, pos, r, allN) {
+  // Centroid of member circles
+  let cx = indices.reduce((s,i) => s + pos[i].x, 0) / indices.length;
+  let cy = indices.reduce((s,i) => s + pos[i].y, 0) / indices.length;
+
+  // For pairwise regions in 4+ sets, nudge further toward the member centroid
+  // and away from non-member circles
+  const excludes = [];
+  for (let i = 0; i < allN; i++) if (!indices.includes(i)) excludes.push(i);
+
+  // Repulsion from non-member circles
+  excludes.forEach(j => {
+    const dx = cx - pos[j].x, dy = cy - pos[j].y;
+    const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    // Push away proportionally to how close the non-member is
+    const force = r * 0.18 / dist;
+    cx += dx * force;
+    cy += dy * force;
+  });
+
+  // For all-set intersections (centre region), pull toward overall diagram centre
+  if (indices.length === allN && allN >= 3) {
+    const gcx = pos.reduce((s,p) => s + p.x, 0) / allN;
+    const gcy = pos.reduce((s,p) => s + p.y, 0) / allN;
+    cx = cx * 0.4 + gcx * 0.6;
+    cy = cy * 0.4 + gcy * 0.6;
+  }
+
+  return { x: cx, y: cy };
+}
 function buildVenn() {
   const gsets = getGeneSets();
   if (gsets.some(s => s.genes.size === 0)) {
@@ -1031,11 +1078,9 @@ function buildVenn() {
 
   // region count labels
   regions.forEach(reg => {
-    const rcx = reg.indices.reduce((a,i) => a + pos[i].x, 0) / reg.indices.length;
-    const rcy = reg.indices.reduce((a,i) => a + pos[i].y, 0) / reg.indices.length;
-
     if (reg.indices.length > 1) {
-      const t = mkT(rcx, rcy, String(reg.genes.size), '#1a1a1a', '18', '700', 'middle');
+      const lp = regionLabelPos(reg.indices, pos, r, n);
+      const t = mkT(lp.x, lp.y, String(reg.genes.size), '#1a1a1a', '18', '700', 'middle');
       t.style.cursor = 'pointer';
       t.addEventListener('mouseenter', e => showVennTip(e, reg));
       t.addEventListener('mouseleave', hideVennTip);
@@ -1340,10 +1385,9 @@ function rebuildSVGOnly() {
   });
 
   regions.forEach(reg => {
-    const rcx = reg.indices.reduce((a,i)=>a+pos[i].x,0)/reg.indices.length;
-    const rcy = reg.indices.reduce((a,i)=>a+pos[i].y,0)/reg.indices.length;
     if (reg.indices.length > 1) {
-      const t = mkT(rcx,rcy,String(reg.genes.size),'#1a1a1a','18','700','middle');
+      const lp = regionLabelPos(reg.indices, pos, r, n);
+      const t = mkT(lp.x,lp.y,String(reg.genes.size),'#1a1a1a','18','700','middle');
       t.style.cursor = 'pointer';
       t.addEventListener('mouseenter', e => showVennTip(e,reg));
       t.addEventListener('mouseleave', hideVennTip);
@@ -1454,6 +1498,201 @@ function downloadCSV() {
   URL.revokeObjectURL(a.href);
 }
 
+
+// ── PPTX export ───────────────────────────────────────────────────────────────
+async function downloadPPTX() {
+  if (!window._lastRegions || !window._lastGsets) {
+    alert('Build the diagram first.'); return;
+  }
+  if (typeof PptxGenJS === 'undefined') {
+    alert('PptxGenJS library not loaded yet — please wait a moment and try again.'); return;
+  }
+
+  const btn = document.getElementById('pptx-btn');
+  const origLabel = btn.innerHTML;
+  btn.innerHTML = '⏳ Building…';
+  btn.disabled = true;
+
+  try {
+    // ── 1. Render SVG → PNG (same tight-crop logic as downloadPNG) ────────────
+    const svg = document.getElementById('venn-svg');
+    const EXPORT_W = 3200;   // high-res for slide
+
+    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+    svg.querySelectorAll('circle,text,rect,path,line,ellipse').forEach(el => {
+      try {
+        const b = el.getBBox();
+        if (!b.width && !b.height) return;
+        minX=Math.min(minX,b.x); minY=Math.min(minY,b.y);
+        maxX=Math.max(maxX,b.x+b.width); maxY=Math.max(maxY,b.y+b.height);
+      } catch(_){}
+    });
+    const vb = svg.viewBox.baseVal;
+    if (!isFinite(minX)){minX=vb.x;minY=vb.y;maxX=vb.x+vb.width;maxY=vb.y+vb.height;}
+    const pad = (maxX-minX)*0.04;
+    const cX=minX-pad, cY=minY-pad, cW=(maxX-minX)+pad*2, cH=(maxY-minY)+pad*2;
+    const EXPORT_H = Math.round(EXPORT_W * cH / cW);
+
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('viewBox',`${cX} ${cY} ${cW} ${cH}`);
+    clone.setAttribute('width', EXPORT_W);
+    clone.setAttribute('height', EXPORT_H);
+    const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    bg.setAttribute('x',cX); bg.setAttribute('y',cY);
+    bg.setAttribute('width',cW); bg.setAttribute('height',cH);
+    bg.setAttribute('fill','white');
+    clone.insertBefore(bg, clone.firstChild);
+
+    const svgBlob = new Blob([new XMLSerializer().serializeToString(clone)],
+      {type:'image/svg+xml;charset=utf-8'});
+    const svgUrl = URL.createObjectURL(svgBlob);
+
+    const imgDataUrl = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = EXPORT_W; canvas.height = EXPORT_H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, EXPORT_W, EXPORT_H);
+        ctx.drawImage(img, 0, 0, EXPORT_W, EXPORT_H);
+        URL.revokeObjectURL(svgUrl);
+        resolve(canvas.toDataURL('image/png').replace('data:image/png;base64,',''));
+      };
+      img.onerror = reject;
+      img.src = svgUrl;
+    });
+
+    // ── 2. Find the most-intersected region (most sets, then most genes) ───────
+    const sorted = [...window._lastRegions].sort((a,b) =>
+      b.indices.length - a.indices.length || b.genes.size - a.genes.size
+    );
+    const topRegion = sorted[0];
+    const topGenes  = [...topRegion.genes].sort();
+
+    // ── 3. Build PPTX ──────────────────────────────────────────────────────────
+    const pptx = new PptxGenJS();
+    pptx.layout = 'LAYOUT_WIDE';   // 13.3" × 7.5"
+    const SW = 13.3, SH = 7.5;
+    const MARGIN = 0.35;
+
+    const slide = pptx.addSlide();
+    slide.background = { color: 'FAFAF8' };
+
+    // ── Diagram image — top portion ───────────────────────────────────────────
+    // Keep natural aspect ratio, fit within top 58% of slide width
+    const availW = SW - MARGIN * 2;
+    const imgAspect = EXPORT_W / EXPORT_H;
+    const imgH = (SH * 0.56);
+    const imgW = Math.min(imgH * imgAspect, availW);
+    const imgX = MARGIN + (availW - imgW) / 2;
+    const imgY = MARGIN;
+
+    slide.addImage({
+      data: 'image/png;base64,' + imgDataUrl,
+      x: imgX, y: imgY, w: imgW, h: imgH
+    });
+
+    // ── Divider line ──────────────────────────────────────────────────────────
+    const divY = imgY + imgH + 0.12;
+    slide.addShape(pptx.shapes.LINE, {
+      x: MARGIN, y: divY, w: availW, h: 0,
+      line: { color: 'E0DED6', width: 0.75 }
+    });
+
+    // ── Gene list section — bottom ────────────────────────────────────────────
+    const listY = divY + 0.18;
+    const listH = SH - listY - MARGIN;
+
+    // Section label
+    const depth = topRegion.indices.length;
+    const sectionLabel = depth === window._lastGsets.length && depth > 1
+      ? `Shared by all ${depth} sets  (n = ${topGenes.length})`
+      : depth > 1
+        ? `Shared by ${depth} sets: ${topRegion.label}  (n = ${topGenes.length})`
+        : `${topRegion.label}  (n = ${topGenes.length})`;
+
+    // Blend the intersection colour for the accent
+    const accentHex = interColor(topRegion.indices).replace('#','');
+
+    slide.addText(sectionLabel, {
+      x: MARGIN, y: listY, w: availW, h: 0.28,
+      fontSize: 9, bold: true, color: accentHex,
+      fontFace: 'Calibri', margin: 0,
+      charSpacing: 1
+    });
+
+    // Gene pills laid out as a flowing wrapped table
+    // Pack genes into rows of ~14 columns
+    const COLS = 14;
+    const colW = availW / COLS;
+    const rowH  = 0.22;
+    const geneY = listY + 0.32;
+    const maxRows = Math.floor((SH - geneY - MARGIN) / rowH);
+    const maxGenes = maxRows * COLS;
+    const displayGenes = topGenes.slice(0, maxGenes);
+    const overflow = topGenes.length - displayGenes.length;
+
+    // Build table rows
+    const tableRows = [];
+    for (let r = 0; r < Math.ceil(displayGenes.length / COLS); r++) {
+      const row = [];
+      for (let col = 0; col < COLS; col++) {
+        const gene = displayGenes[r * COLS + col] || '';
+        row.push({
+          text: gene,
+          options: {
+            fontSize: 7.5,
+            fontFace: 'Courier New',
+            color: gene ? '2d2d2d' : 'ffffff',
+            fill: { color: gene ? (r % 2 === 0 ? 'F4F3F0' : 'ECEAE4') : 'FAFAF8' },
+            align: 'left',
+            margin: [2, 4, 2, 4]
+          }
+        });
+      }
+      tableRows.push(row);
+    }
+
+    if (tableRows.length > 0) {
+      slide.addTable(tableRows, {
+        x: MARGIN, y: geneY,
+        w: availW,
+        colW: Array(COLS).fill(colW),
+        rowH: rowH,
+        border: { pt: 0.3, color: 'E0DED6' }
+      });
+    }
+
+    // Overflow note
+    if (overflow > 0) {
+      const noteY = geneY + tableRows.length * rowH + 0.05;
+      slide.addText(`+ ${overflow} more genes (see full list in CSV export)`, {
+        x: MARGIN, y: noteY, w: availW, h: 0.18,
+        fontSize: 7, color: 'AAAAAA', italic: true, fontFace: 'Calibri', margin: 0
+      });
+    }
+
+    // ── Set legend strip at very bottom ──────────────────────────────────────
+    const legendY = SH - MARGIN - 0.18;
+    const setNames = window._lastGsets.map((s,i) => ({
+      text: '■ ' + s.name + '  ',
+      options: { color: effectiveColor(i).replace('#',''), fontSize: 7.5,
+                 fontFace: 'Calibri', bold: false }
+    }));
+    slide.addText(setNames, {
+      x: MARGIN, y: legendY, w: availW, h: 0.18, margin: 0
+    });
+
+    // ── Save ──────────────────────────────────────────────────────────────────
+    const ts = new Date().toISOString().slice(0,10);
+    await pptx.writeFile({ fileName: `venn_diagram_${ts}.pptx` });
+
+  } finally {
+    btn.innerHTML = origLabel;
+    btn.disabled = false;
+  }
+}
 // ── spinner keyframe (injected) ──────────────────────────────────────────────
 const style = document.createElement('style');
 style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
