@@ -833,9 +833,15 @@ function loadExample() {
 
 // ── embedded gene DB (injected by build_gene_db.py) ─────────────────────────
 // Before running build_gene_db.py this is empty; after injection it becomes:
-//   </script>
+//   const GENE_DB = { "SLFN14": { n:"...", s:"...", e:"12345" }, … }
+// Keys are uppercase gene symbols; values use short keys to minimise file size:
+//   n = full gene name, s = RefSeq summary paragraph, e = Entrez Gene ID
+</script>
 <script src="gene_db.js"></script>
 <script>
+
+// Normalised lookup map (built once at startup)
+const _DB = {};
 if (typeof GENE_DB !== 'undefined') {
   for (const [k, v] of Object.entries(GENE_DB)) {
     _DB[k.toUpperCase()] = v;
@@ -983,36 +989,22 @@ function getAllRegions(gsets) {
 
 
 // ── Smart region label placement ──────────────────────────────────────────────
-// For a region defined by `indices` (the circles it belongs to) and `excludes`
-// (all other circles), compute a label position that sits inside the lens/petal.
-// Strategy: start from the centroid of the member circles, then nudge AWAY from
-// each non-member circle centre so the label avoids overlapping adjacent regions.
+// Places the label at the centroid of member circles, then nudges it away from
+// non-member circles by a fixed, clamped amount so it stays inside the overlap.
 function regionLabelPos(indices, pos, r, allN) {
-  // Centroid of member circles
+  // Centroid of the member circles
   let cx = indices.reduce((s,i) => s + pos[i].x, 0) / indices.length;
   let cy = indices.reduce((s,i) => s + pos[i].y, 0) / indices.length;
 
-  // For pairwise regions in 4+ sets, nudge further toward the member centroid
-  // and away from non-member circles
-  const excludes = [];
-  for (let i = 0; i < allN; i++) if (!indices.includes(i)) excludes.push(i);
-
-  // Repulsion from non-member circles
-  excludes.forEach(j => {
-    const dx = cx - pos[j].x, dy = cy - pos[j].y;
+  // Nudge away from each non-member circle — use a small fixed step
+  for (let i = 0; i < allN; i++) {
+    if (indices.includes(i)) continue;
+    const dx = cx - pos[i].x, dy = cy - pos[i].y;
     const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-    // Push away proportionally to how close the non-member is
-    const force = r * 0.18 / dist;
-    cx += dx * force;
-    cy += dy * force;
-  });
-
-  // For all-set intersections (centre region), pull toward overall diagram centre
-  if (indices.length === allN && allN >= 3) {
-    const gcx = pos.reduce((s,p) => s + p.x, 0) / allN;
-    const gcy = pos.reduce((s,p) => s + p.y, 0) / allN;
-    cx = cx * 0.4 + gcx * 0.6;
-    cy = cy * 0.4 + gcy * 0.6;
+    // Small fixed nudge (15px) in the direction away from the non-member
+    const step = Math.min(15, r * 0.12);
+    cx += (dx / dist) * step;
+    cy += (dy / dist) * step;
   }
 
   return { x: cx, y: cy };
@@ -1029,17 +1021,17 @@ function buildVenn() {
   svg.innerHTML = '';
 
   const W = 800;
-  const H = n <= 2 ? 440 : n === 3 ? 500 : n <= 5 ? 480 : 500;
+  const H = n <= 2 ? 420 : n === 3 ? 510 : n === 4 ? 470 : n <= 5 ? 510 : 510;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
   const layouts = {
-    2: [{x:285,y:218},{x:515,y:218}],
-    3: [{x:318,y:175},{x:482,y:175},{x:400,y:312}],
-    4: [{x:278,y:192},{x:448,y:192},{x:258,y:312},{x:478,y:312}],
-    5: [{x:310,y:163},{x:462,y:163},{x:248,y:285},{x:400,y:345},{x:532,y:285}],
-    6: [{x:290,y:157},{x:434,y:157},{x:558,y:245},{x:494,y:345},{x:310,y:345},{x:234,y:245}]
+    2: [{x:280,y:230},{x:520,y:230}],
+    3: [{x:310,y:185},{x:490,y:185},{x:400,y:335}],
+    4: [{x:343,y:185},{x:457,y:185},{x:343,y:295},{x:457,y:295}],
+    5: [{x:305,y:175},{x:465,y:175},{x:240,y:300},{x:400,y:355},{x:530,y:300}],
+    6: [{x:290,y:165},{x:430,y:165},{x:545,y:250},{x:490,y:355},{x:310,y:355},{x:235,y:250}]
   };
-  const radii = {2:134,3:120,4:110,5:93,6:83};
+  const radii = {2:140,3:130,4:125,5:105,6:90};
   const pos = layouts[Math.min(n,6)] || layouts[3];
   const r   = radii[Math.min(n,6)]   || 100;
 
@@ -1345,13 +1337,13 @@ function rebuildSVGOnly() {
   svg.innerHTML  = '';
 
   const layouts = {
-    2:[{x:285,y:218},{x:515,y:218}],
-    3:[{x:318,y:180},{x:482,y:180},{x:400,y:322}],
-    4:[{x:278,y:192},{x:448,y:192},{x:258,y:312},{x:478,y:312}],
-    5:[{x:310,y:163},{x:462,y:163},{x:248,y:285},{x:400,y:345},{x:532,y:285}],
-    6:[{x:290,y:157},{x:434,y:157},{x:558,y:245},{x:494,y:345},{x:310,y:345},{x:234,y:245}]
+    2:[{x:280,y:230},{x:520,y:230}],
+    3:[{x:310,y:185},{x:490,y:185},{x:400,y:335}],
+    4:[{x:343,y:185},{x:457,y:185},{x:343,y:295},{x:457,y:295}],
+    5:[{x:305,y:175},{x:465,y:175},{x:240,y:300},{x:400,y:355},{x:530,y:300}],
+    6:[{x:290,y:165},{x:430,y:165},{x:545,y:250},{x:490,y:355},{x:310,y:355},{x:235,y:250}]
   };
-  const radii = {2:134,3:120,4:110,5:93,6:83};
+  const radii = {2:140,3:130,4:125,5:105,6:90};
   const pos = layouts[Math.min(n,6)] || layouts[3];
   const r   = radii[Math.min(n,6)]   || 100;
   const cx0 = pos.reduce((a,p)=>a+p.x,0)/pos.length;
