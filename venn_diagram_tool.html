@@ -833,9 +833,15 @@ function loadExample() {
 
 // ── embedded gene DB (injected by build_gene_db.py) ─────────────────────────
 // Before running build_gene_db.py this is empty; after injection it becomes:
-//   </script>
+//   const GENE_DB = { "SLFN14": { n:"...", s:"...", e:"12345" }, … }
+// Keys are uppercase gene symbols; values use short keys to minimise file size:
+//   n = full gene name, s = RefSeq summary paragraph, e = Entrez Gene ID
+</script>
 <script src="gene_db.js"></script>
 <script>
+
+// Normalised lookup map (built once at startup)
+const _DB = {};
 if (typeof GENE_DB !== 'undefined') {
   for (const [k, v] of Object.entries(GENE_DB)) {
     _DB[k.toUpperCase()] = v;
@@ -982,23 +988,105 @@ function getAllRegions(gsets) {
 }
 
 
-// ── Smart region label placement ──────────────────────────────────────────────
-// Places the label at the centroid of member circles, then nudges it away from
-// non-member circles by a fixed, clamped amount so it stays inside the overlap.
+// ── Label placement ───────────────────────────────────────────────────────────
+// For INTERSECTION regions: find the point that maximises the minimum distance
+// to all non-member circles while staying inside all member circles.
+// Uses gradient ascent starting from the member centroid.
 function regionLabelPos(indices, pos, r, allN) {
-  // Centroid of the member circles
+  // Start at centroid of member circles
   let cx = indices.reduce((s,i) => s + pos[i].x, 0) / indices.length;
   let cy = indices.reduce((s,i) => s + pos[i].y, 0) / indices.length;
 
-  // Nudge away from each non-member circle — use a small fixed step
-  for (let i = 0; i < allN; i++) {
-    if (indices.includes(i)) continue;
-    const dx = cx - pos[i].x, dy = cy - pos[i].y;
-    const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-    // Small fixed nudge (15px) in the direction away from the non-member
-    const step = Math.min(15, r * 0.12);
-    cx += (dx / dist) * step;
-    cy += (dy / dist) * step;
+  const excludes = [];
+  for (let i = 0; i < allN; i++) if (!indices.includes(i)) excludes.push(i);
+
+  // Gradient ascent: repeatedly step away from the closest non-member circle
+  // and toward the centroid of member circles
+  for (let iter = 0; iter < 60; iter++) {
+    let fx = 0, fy = 0;
+
+    // Repel from non-member circles (force inversely proportional to distance)
+    excludes.forEach(j => {
+      const dx = cx - pos[j].x, dy = cy - pos[j].y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      const strength = (r * 1.5) / (dist * dist);
+      fx += (dx / dist) * strength;
+      fy += (dy / dist) * strength;
+    });
+
+    // Weak pull toward member centroid to stay inside the overlap
+    const mcx = indices.reduce((s,i) => s + pos[i].x, 0) / indices.length;
+    const mcy = indices.reduce((s,i) => s + pos[i].y, 0) / indices.length;
+    fx += (mcx - cx) * 0.08;
+    fy += (mcy - cy) * 0.08;
+
+    // Step size decays over iterations
+    const step = 4 * (1 - iter / 80);
+    const mag = Math.sqrt(fx*fx + fy*fy) || 1;
+    cx += (fx / mag) * step;
+    cy += (fy / mag) * step;
+
+    // Clamp: must remain inside ALL member circles
+    indices.forEach(i => {
+      const dx = cx - pos[i].x, dy = cy - pos[i].y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      if (dist > r * 0.92) {
+        cx = pos[i].x + (dx / dist) * r * 0.92;
+        cy = pos[i].y + (dy / dist) * r * 0.92;
+      }
+    });
+  }
+
+  return { x: cx, y: cy };
+}
+
+// For EXCLUSIVE regions: find the point inside the circle but outside
+// all other circles — push outward from diagram centre, then away from
+// each non-member circle until we're clearly in the crescent.
+function exclusiveLabelPos(idx, pos, r, allN, cx0, cy0) {
+  const {x, y} = pos[idx];
+
+  // Direction away from diagram centre
+  const dx0 = x - cx0, dy0 = y - cy0;
+  const d0 = Math.sqrt(dx0*dx0 + dy0*dy0) || 1;
+
+  // Start 40% of radius out from circle centre in that direction
+  let cx = x + (dx0/d0) * r * 0.40;
+  let cy = y + (dy0/d0) * r * 0.40;
+
+  // Iteratively push away from non-member circles
+  const others = [];
+  for (let i = 0; i < allN; i++) if (i !== idx) others.push(i);
+
+  for (let iter = 0; iter < 40; iter++) {
+    let fx = 0, fy = 0;
+
+    others.forEach(j => {
+      const dx = cx - pos[j].x, dy = cy - pos[j].y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      if (dist < r * 1.4) {  // only repel if nearby
+        const strength = (r * 1.2) / (dist * dist);
+        fx += (dx / dist) * strength;
+        fy += (dy / dist) * strength;
+      }
+    });
+
+    // Always pull toward own circle centre to stay inside
+    const ddx = x - cx, ddy = y - cy;
+    fx += ddx * 0.04;
+    fy += ddy * 0.04;
+
+    const step = 3 * (1 - iter / 50);
+    const mag = Math.sqrt(fx*fx + fy*fy) || 1;
+    cx += (fx / mag) * step;
+    cy += (fy / mag) * step;
+
+    // Clamp inside own circle
+    const dist = Math.sqrt((cx-x)*(cx-x) + (cy-y)*(cy-y));
+    if (dist > r * 0.88) {
+      cx = x + ((cx-x)/dist) * r * 0.88;
+      cy = y + ((cy-y)/dist) * r * 0.88;
+    }
   }
 
   return { x: cx, y: cy };
@@ -1067,12 +1155,8 @@ function buildVenn() {
       t.addEventListener('click', () => scrollToResult(reg.label));
       svg.appendChild(t);
     } else {
-      const i = reg.indices[0];
-      const {x, y} = pos[i];
-      const dx = x - cx0, dy = y - cy0, dist = Math.sqrt(dx*dx+dy*dy)||1;
-      const ex = x + (dx/dist) * (r * 0.44);
-      const ey = y + (dy/dist) * (r * 0.34);
-      svg.appendChild(mkT(ex, ey, String(reg.genes.size), '#777', '16', '600', 'middle'));
+      const lp = exclusiveLabelPos(reg.indices[0], pos, r, n, cx0, cy0);
+      svg.appendChild(mkT(lp.x, lp.y, String(reg.genes.size), '#777', '16', '600', 'middle'));
     }
   });
 
@@ -1374,11 +1458,8 @@ function rebuildSVGOnly() {
       t.addEventListener('click', () => scrollToResult(reg.label));
       svg.appendChild(t);
     } else {
-      const i = reg.indices[0];
-      const {x,y} = pos[i];
-      const dx=x-cx0, dy=y-cy0, dist=Math.sqrt(dx*dx+dy*dy)||1;
-      svg.appendChild(mkT(x+(dx/dist)*(r*0.44), y+(dy/dist)*(r*0.34),
-                          String(reg.genes.size),'#777','16','600','middle'));
+      const lp2 = exclusiveLabelPos(reg.indices[0], pos, r, n, cx0, cy0);
+      svg.appendChild(mkT(lp2.x, lp2.y, String(reg.genes.size),'#777','16','600','middle'));
     }
   });
 
