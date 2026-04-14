@@ -817,10 +817,21 @@ function removeSet(id) {
 function clearAll() {
   sets.forEach((s, i) => { sets[i].genes = ''; sets[i].name = 'Set ' + (i+1); });
   renderSetInputs();
-  window._isUpset = false;
-  ['diagram-area','results-panel','stats-row'].forEach(id => {
-    document.getElementById(id).style.display = 'none';
+  // Reset all cached state so stale data can never leak into the next build
+  window._isUpset     = false;
+  window._lastRegions = null;
+  window._lastGsets   = null;
+  Object.keys(geneCache).forEach(k => delete geneCache[k]);
+  ['diagram-area','results-panel','stats-row','diagram-toolbar'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
   });
+  // Clear the SVG too
+  const svg = document.getElementById('venn-svg');
+  if (svg) svg.innerHTML = '';
+  // Clear results grid
+  const grid = document.getElementById('results-grid');
+  if (grid) grid.innerHTML = '';
 }
 
 function loadExample() {
@@ -1506,11 +1517,11 @@ function renderResults(gsets, regions) {
     card.id = 'result-' + reg.label.replace(/[^a-z0-9]/gi,'_');
 
     const pillsHtml = genes.map(g => {
-      const gs = g.replace(/'/g, "\'");
+      const gs = encodeURIComponent(g);  // safe for inline event attrs
       return `<span class="gene-pill"
-        onmouseenter="showGenePopup(event,'${gs}')"
+        onmouseenter="showGenePopup(event,decodeURIComponent('${gs}'))"
         onmouseleave="hideGenePopup()"
-        onclick="window.open('https://www.ncbi.nlm.nih.gov/gene/?term=${gs}[sym]+AND+human[orgn]','_blank')"
+        onclick="window.open('https://www.ncbi.nlm.nih.gov/gene/?term='+decodeURIComponent('${gs}')+'[sym]+AND+human[orgn]','_blank')"
         title="Hover: function · Click: NCBI Gene"
       >${g}</span>`;
     }).join('');
@@ -1676,8 +1687,21 @@ function rebuildSVGOnly() {
     }
   });
 
-  // Also refresh result card dot/header colours
-  if (window._lastRegions) renderResults(gsets, regions);
+  // Refresh result card header colours in-place (don't re-render full list)
+  if (window._lastRegions) {
+    document.querySelectorAll('.result-card').forEach(card => {
+      const idStr = card.id.replace('result-','').replace(/_/g,' ');
+      const reg = window._lastRegions.find(r =>
+        r.label.replace(/[^a-z0-9]/gi,'_') === card.id.replace('result-','')
+      );
+      if (!reg) return;
+      const col = interColor(reg.indices);
+      const dot = card.querySelector('.dot');
+      if (dot) dot.style.background = col;
+      const h3 = card.querySelector('h3');
+      if (h3 && reg.indices.length > 1) h3.style.color = col;
+    });
+  }
 }
 
 // ── PNG export ─────────────────────────────────────────────────────────────────
